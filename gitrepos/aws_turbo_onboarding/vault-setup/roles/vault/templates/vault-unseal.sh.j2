@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# =============================================================================
+# HashiCorp Vault Auto-Unseal Script for systemd
+# =============================================================================
+set -uo pipefail
+
+VAULT_ADDR="https://127.0.0.1:8200"
+UNSEAL_KEYS_FILE="{{ vault_unseal_keys_file }}"
+export VAULT_ADDR
+export VAULT_SKIP_VERIFY="true"
+
+# 1. Wait for Vault API listener to become ready
+MAX_WAIT=30
+WAITED=0
+echo "Waiting for Vault API to become responsive..."
+while [ $WAITED -lt $MAX_WAIT ]; do
+  HTTP_CODE=$(curl -sk -o /dev/null -w "%{http_code}" "${VAULT_ADDR}/v1/sys/health" 2>/dev/null || true)
+  if [[ "$HTTP_CODE" =~ ^(200|429|472|473|501|503)$ ]]; then
+    break
+  fi
+  sleep 2
+  WAITED=$((WAITED + 2))
+done
+
+# Helper function to check if Vault is sealed
+is_sealed() {
+  local status
+  status=$(curl -sk "${VAULT_ADDR}/v1/sys/seal-status" 2>/dev/null | jq -r 'if has("sealed") then (.sealed | tostring) else "unknown" end' 2>/dev/null || true)
+  if [ "$status" = "false" ]; then
+    return 1 # Not sealed (0 = sealed, 1 = unsealed)
+  else
+    return 0 # Sealed or unknown
+  fi
+}
+
+# 2. Check if already unsealed
+if ! is_sealed; then
+  echo "Vault is already unsealed."
+  exit 0
+fi
+
+if [ ! -f "$UNSEAL_KEYS_FILE" ]; then
+  echo "ERROR: Unseal keys file $UNSEAL_KEYS_FILE does not exist." >&2
+  exit 1
+fi
+
+# 3. Read unseal keys
+KEYS=$(jq -r 'if type=="array" then .[] elif .keys_base64 then .keys_base64[] elif .keys then .keys[] else empty end' "$UNSEAL_KEYS_FILE" 2>/dev/null || true)
+if [ -z "$KEYS" ]; then
+  echo "ERROR: Could not parse unseal keys from $UNSEAL_KEYS_FILE." >&2
+  exit 1
+fi
+
+# 4. Submit unseal keys
+for KEY in $KEYS; do
+  if [ -x /usr/local/bin/vault ]; then
+    /usr/local/bin/vault operator unseal "$KEY" >/dev/null 2>&1 || true
+  else
+    curl -sk -X PUT "${VAULT_ADDR}/v1/sys/unseal" \
+      -H "Content-Type: application/json" \
+      -d "{\"key\": \"${KEY}\"}" >/dev/null 2>&1 || true
+  fi
+
+  if ! is_sealed; then
+    echo "Vault auto-unsealed successfully."
+    exit 0
+  fi
+done
+
+if ! is_sealed; then
+  echo "Vault auto-unsealed successfully."
+  exit 0
+fi
+
+echo "ERROR: Vault remains sealed after submitting all keys from $UNSEAL_KEYS_FILE." >&2
+exit 1

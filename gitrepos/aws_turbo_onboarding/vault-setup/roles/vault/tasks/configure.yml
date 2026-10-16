@@ -1,0 +1,100 @@
+---
+# ---------------------------------------------------------------------------
+# TLS — self-signed certificate (replace with CA-signed cert in production)
+# ---------------------------------------------------------------------------
+
+- name: Generate TLS private key
+  ansible.builtin.command: >
+    openssl genrsa -out {{ vault_tls_dir }}/vault-key.pem 4096
+  args:
+    creates: "{{ vault_tls_dir }}/vault-key.pem"
+
+- name: Build Subject Alternative Names string
+  ansible.builtin.set_fact:
+    vault_san_string: "{{ vault_tls_cert_subject_alt_names | join(',') }}"
+
+- name: Generate self-signed TLS certificate (10-year validity)
+  ansible.builtin.command: >
+    openssl req -new -x509
+      -key {{ vault_tls_dir }}/vault-key.pem
+      -out {{ vault_tls_dir }}/vault-cert.pem
+      -days 3650
+      -subj "/CN=vault.local/O=Turbo Toolkit"
+      -addext "subjectAltName={{ vault_san_string }}"
+  args:
+    creates: "{{ vault_tls_dir }}/vault-cert.pem"
+
+- name: Set TLS file permissions (vault user read-only)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    owner: "{{ vault_user }}"
+    group: "{{ vault_group }}"
+    mode: "0400"
+  loop:
+    - "{{ vault_tls_dir }}/vault-key.pem"
+    - "{{ vault_tls_dir }}/vault-cert.pem"
+
+# ---------------------------------------------------------------------------
+# vault.hcl — server configuration
+# ---------------------------------------------------------------------------
+
+- name: Deploy vault.hcl configuration
+  ansible.builtin.template:
+    src: vault.hcl.j2
+    dest: "{{ vault_config_dir }}/vault.hcl"
+    owner: "{{ vault_user }}"
+    group: "{{ vault_group }}"
+    mode: "0640"
+  register: vault_hcl_result
+
+# ---------------------------------------------------------------------------
+# systemd service
+# ---------------------------------------------------------------------------
+
+- name: Deploy vault systemd unit
+  ansible.builtin.template:
+    src: vault.service.j2
+    dest: /etc/systemd/system/vault.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: vault_service_result
+
+- name: Reload systemd daemon if service unit changed
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: vault_service_result.changed
+
+- name: Restart vault service if config or service definition changed
+  ansible.builtin.systemd:
+    name: vault
+    state: restarted
+  when: vault_hcl_result.changed or vault_service_result.changed
+
+- name: Enable and start vault service
+  ansible.builtin.systemd:
+    name: vault
+    enabled: true
+    state: started
+
+- name: Wait for Vault API to be reachable
+  ansible.builtin.uri:
+    url: "https://127.0.0.1:8200/v1/sys/health"
+    validate_certs: false
+    status_code: [200, 429, 472, 473, 501, 503]
+  register: vault_health
+  until: vault_health.status in [200, 429, 472, 473, 501, 503]
+  retries: 15
+  delay: 5
+
+# ---------------------------------------------------------------------------
+# Firewall — open port 8200
+# ---------------------------------------------------------------------------
+
+- name: Open Vault port 8200 in firewalld
+  ansible.posix.firewalld:
+    port: 8200/tcp
+    permanent: true
+    state: enabled
+    immediate: true
+  ignore_errors: true   # firewalld may not be active on all RHEL configs

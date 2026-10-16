@@ -1,0 +1,53 @@
+# =============================================================================
+# Vault Server Configuration
+# Managed by Ansible — do not edit manually
+# =============================================================================
+
+ui        = true
+log_level = "info"
+log_file  = "{{ vault_log_dir }}/vault.log"
+
+# ---------------------------------------------------------------------------
+# TCP Listener — TLS on port 8200
+# ---------------------------------------------------------------------------
+listener "tcp" {
+  address       = "{{ vault_listen_address }}"
+  tls_cert_file = "{{ vault_tls_dir }}/vault-cert.pem"
+  tls_key_file  = "{{ vault_tls_dir }}/vault-key.pem"
+}
+
+# ---------------------------------------------------------------------------
+# Integrated Storage (Raft) — single node, no external backend
+# ---------------------------------------------------------------------------
+storage "raft" {
+  path    = "{{ vault_data_dir }}"
+  node_id = "{{ vault_raft_node_id }}"
+}
+
+# Addresses advertised to clients and cluster peers
+api_addr     = "https://{{ ansible_default_ipv4.address | default(ansible_host) | default('127.0.0.1') }}:8200"
+cluster_addr = "https://{{ ansible_default_ipv4.address | default(ansible_host) | default('127.0.0.1') }}:8201"
+
+# Disable memory lock to ensure reliable startup on cloud VM environments
+disable_mlock = true
+
+{% if vault_auto_unseal_type == 'awskms' %}
+# ---------------------------------------------------------------------------
+# AWS KMS Auto-Unseal
+# ---------------------------------------------------------------------------
+seal "awskms" {
+  region     = "{{ vault_awskms_region }}"
+  kms_key_id = "{{ vault_awskms_key_id }}"
+}
+{% elif vault_auto_unseal_type == 'azurekeyvault' %}
+# ---------------------------------------------------------------------------
+# Azure Key Vault Auto-Unseal
+# ---------------------------------------------------------------------------
+seal "azurekeyvault" {
+  tenant_id     = "{{ vault_azure_tenant_id }}"
+  client_id     = "{{ vault_azure_client_id }}"
+  client_secret = "{{ vault_azure_client_secret }}"
+  vault_name    = "{{ vault_azure_vault_name }}"
+  key_name      = "{{ vault_azure_key_name }}"
+}
+{% endif %}

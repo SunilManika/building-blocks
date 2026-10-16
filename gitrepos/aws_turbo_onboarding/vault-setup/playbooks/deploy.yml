@@ -1,0 +1,73 @@
+---
+- name: Deploy HashiCorp Vault — Single Node on RHEL
+  hosts: vault
+  become: true
+  gather_facts: true
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/vault.yml"
+
+  pre_tasks:
+    - name: Ensure output directory exists on control node
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../output"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "==================================================="
+          - " HashiCorp Vault Deployment"
+          - "==================================================="
+          - " Target host  : {{ inventory_hostname }}"
+          - " Vault version: {{ vault_version }}"
+          - " Storage      : Raft (Integrated Storage, single node)"
+          - " Auto-unseal  : {{ vault_auto_unseal_type }}"
+          - " KV mount     : {{ vault_kv_mount_path }}/"
+          - " AppRole      : {{ vault_approle_name }}"
+          - "==================================================="
+
+  roles:
+    - role: ../roles/vault
+
+  post_tasks:
+    - name: Flush handlers to ensure pending restarts complete
+      ansible.builtin.meta: flush_handlers
+
+    - name: Ensure Vault is unsealed for final health check
+      ansible.builtin.command: /usr/local/bin/vault-unseal.sh
+      when: vault_auto_unseal_type == 'file'
+
+    - name: Final health check
+      ansible.builtin.uri:
+        url: "https://127.0.0.1:8200/v1/sys/health"
+        validate_certs: false
+        status_code: 200
+      register: final_health
+      until: final_health.status == 200 and not final_health.json.sealed
+      retries: 10
+      delay: 3
+
+    - name: Deployment complete
+      ansible.builtin.debug:
+        msg:
+          - "==================================================="
+          - " Vault deployment COMPLETE"
+          - "==================================================="
+          - " Vault UI      : https://{{ ansible_host }}:8200/ui"
+          - " Seal status   : {{ 'UNSEALED' if not final_health.json.sealed else 'SEALED' }}"
+          - " Init data     : output/vault-init.json   (KEEP SECURE)"
+          - " AppRole creds : output/approle-credentials.json"
+          - "==================================================="
+          - " NEXT STEPS:"
+          - " 1. On the Windows management VM, set these environment"
+          - "    variables from output/approle-credentials.json:"
+          - "      VAULT_ADDR      = https://<vault-vm-ip>:8200"
+          - "      VAULT_ROLE_ID   = <role_id>"
+          - "      VAULT_SECRET_ID = <secret_id>"
+          - " 2. Remove plaintext passwords from config/config.json"
+          - "    and replace with vault_path references."
+          - " 3. Store output/vault-init.json securely offline."
+          - "==================================================="

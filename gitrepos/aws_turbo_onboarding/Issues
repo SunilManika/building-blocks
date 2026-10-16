@@ -1,0 +1,290 @@
+https://shell.azure.com/
+
+
+# ============================================================
+# Azure Windows VM - Automated Local Account Unlock
+# Targets: D16, D14, D12, D10
+# Method: Azure VM Run Command + Windows ADSI
+# Account: azureuser
+# ============================================================
+
+$ErrorActionPreference = "Stop"
+
+$resourceGroup = "rg-6a83193ee0f27dc9c69e3205-ThDAE-1"
+$accountName   = "azureuser"
+
+$vmNames = @(
+    "turbo-wmi-win-d16",
+    "turbo-wmi-win-d14",
+    "turbo-wmi-win-d12",
+    "turbo-wmi-win-d10"
+)
+
+# Script executed inside each target VM
+$remoteScript = @'
+$ErrorActionPreference = "Stop"
+
+try {
+    $user = [ADSI]"WinNT://./azureuser,user"
+
+    $before = [bool]$user.InvokeGet("IsAccountLocked")
+
+    if ($before) {
+        $user.InvokeSet("IsAccountLocked", $false)
+        $user.SetInfo()
+    }
+
+    $user.RefreshCache()
+    $after = [bool]$user.InvokeGet("IsAccountLocked")
+
+    [PSCustomObject]@{
+        ComputerName = $env:COMPUTERNAME
+        Account      = "azureuser"
+        WasLocked    = $before
+        IsLocked     = $after
+        Result       = if (-not $after) { "UNLOCKED" } else { "STILL LOCKED" }
+        Error        = ""
+    } | ConvertTo-Json -Compress
+}
+catch {
+    [PSCustomObject]@{
+        ComputerName = $env:COMPUTERNAME
+        Account      = "azureuser"
+        WasLocked    = $null
+        IsLocked     = $null
+        Result       = "FAILED"
+        Error        = $_.Exception.Message
+    } | ConvertTo-Json -Compress
+
+    exit 1
+}
+'@
+
+$results = foreach ($vmName in $vmNames) {
+    Write-Host "`n========================================" -ForegroundColor Cyan
+    Write-Host "Processing VM: $vmName" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+
+    try {
+        $response = Invoke-AzVMRunCommand `
+            -ResourceGroupName $resourceGroup `
+            -VMName $vmName `
+            -CommandId "RunPowerShellScript" `
+            -ScriptString $remoteScript `
+            -ErrorAction Stop
+
+        $stdout = ($response.Value |
+            Where-Object { $_.Code -eq "ComponentStatus/StdOut/succeeded" } |
+            Select-Object -First 1).Message
+
+        $stderr = ($response.Value |
+            Where-Object { $_.Code -match "StdErr" } |
+            Select-Object -First 1).Message
+
+        $data = $null
+
+        if ($stdout) {
+            # Find the JSON result in the command output.
+            $jsonLine = $stdout -split "`r?`n" |
+                Where-Object { $_.Trim().StartsWith("{") } |
+                Select-Object -Last 1
+
+            if ($jsonLine) {
+                $data = $jsonLine | ConvertFrom-Json
+            }
+        }
+
+        if ($data) {
+            [PSCustomObject]@{
+                VM           = $vmName
+                Account      = $accountName
+                WasLocked    = $data.WasLocked
+                IsLocked     = $data.IsLocked
+                Result       = $data.Result
+                Details      = $data.Error
+            }
+        }
+        else {
+            [PSCustomObject]@{
+                VM           = $vmName
+                Account      = $accountName
+                WasLocked    = $null
+                IsLocked     = $null
+                Result       = "CHECK OUTPUT"
+                Details      = if ($stderr) { $stderr } else { $stdout }
+            }
+        }
+    }
+    catch {
+        [PSCustomObject]@{
+            VM           = $vmName
+            Account      = $accountName
+            WasLocked    = $null
+            IsLocked     = $null
+            Result       = "FAILED"
+            Details      = $_.Exception.Message
+        }
+    }
+}
+
+Write-Host "`n`n========== FINAL SUMMARY ==========" -ForegroundColor Green
+
+$results | Format-Table VM, Account, WasLocked, IsLocked, Result, Details -AutoSize -Wrap
+
+# Optional: save the report in the current Cloud Shell session.
+$reportPath = Join-Path $HOME "azure-vm-unlock-report.csv"
+$results | Export-Csv -Path $reportPath -NoTypeInformation
+
+Write-Host "`nReport saved to: $reportPath" -ForegroundColor Green
+
+-------------
+
+$ErrorActionPreference = "Stop"
+
+$resourceGroup = "rg-6a83193ee0f27dc9c69e3205-ThDAE-1"
+
+# Map each VM to its local user account
+$vmUsers = [ordered]@{
+    "turbo-wmi-win-d10" = "turbowmid10"
+    "turbo-wmi-win-d12" = "turbowmid12"
+    "turbo-wmi-win-d14" = "turbowmid14"
+    "turbo-wmi-win-d16" = "turbowmid16"
+}
+
+# Script executed inside each target VM
+$remoteScript = @'
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$AccountName
+)
+
+$ErrorActionPreference = "Stop"
+
+try {
+    $user = [ADSI]("WinNT://./{0},user" -f $AccountName)
+
+    # Check the current lockout state
+    $before = [bool]$user.InvokeGet("IsAccountLocked")
+
+    # Unlock the account only if it is locked
+    if ($before) {
+        $user.InvokeSet("IsAccountLocked", $false)
+        $user.SetInfo()
+    }
+
+    # Refresh and verify the final state
+    $user.RefreshCache()
+    $after = [bool]$user.InvokeGet("IsAccountLocked")
+
+    [PSCustomObject]@{
+        ComputerName = $env:COMPUTERNAME
+        Account      = $AccountName
+        WasLocked    = $before
+        IsLocked     = $after
+        Result       = if (-not $after) {
+            "UNLOCKED"
+        } else {
+            "STILL LOCKED"
+        }
+        Error        = ""
+    } | ConvertTo-Json -Compress
+}
+catch {
+    [PSCustomObject]@{
+        ComputerName = $env:COMPUTERNAME
+        Account      = $AccountName
+        WasLocked    = $null
+        IsLocked     = $null
+        Result       = "FAILED"
+        Error        = $_.Exception.Message
+    } | ConvertTo-Json -Compress
+
+    exit 1
+}
+'@
+
+$results = foreach ($vmName in $vmUsers.Keys) {
+    $accountName = $vmUsers[$vmName]
+
+    Write-Host "`n========================================" -ForegroundColor Cyan
+    Write-Host "Processing VM: $vmName | User: $accountName" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+
+    try {
+        # Pass the account name as a parameter to the remote script
+        $response = Invoke-AzVMRunCommand `
+            -ResourceGroupName $resourceGroup `
+            -VMName $vmName `
+            -CommandId "RunPowerShellScript" `
+            -Parameter @{ AccountName = $accountName } `
+            -ScriptString $remoteScript `
+            -ErrorAction Stop
+
+        $stdout = ($response.Value |
+            Where-Object {
+                $_.Code -eq "ComponentStatus/StdOut/succeeded"
+            } |
+            Select-Object -First 1).Message
+
+        $stderr = ($response.Value |
+            Where-Object {
+                $_.Code -match "StdErr"
+            } |
+            Select-Object -First 1).Message
+
+        $data = $null
+
+        if ($stdout) {
+            $jsonLine = $stdout -split "`r?`n" |
+                Where-Object {
+                    $_.Trim().StartsWith("{")
+                } |
+                Select-Object -Last 1
+
+            if ($jsonLine) {
+                $data = $jsonLine | ConvertFrom-Json -ErrorAction Stop
+            }
+        }
+
+        if ($data) {
+            [PSCustomObject]@{
+                VM        = $vmName
+                Account   = $accountName
+                WasLocked = $data.WasLocked
+                IsLocked  = $data.IsLocked
+                Result    = $data.Result
+                Details   = $data.Error
+            }
+        }
+        else {
+            [PSCustomObject]@{
+                VM        = $vmName
+                Account   = $accountName
+                WasLocked = $null
+                IsLocked  = $null
+                Result    = "CHECK OUTPUT"
+                Details   = if ($stderr) { $stderr } else { $stdout }
+            }
+        }
+    }
+    catch {
+        [PSCustomObject]@{
+            VM        = $vmName
+            Account   = $accountName
+            WasLocked = $null
+            IsLocked  = $null
+            Result    = "FAILED"
+            Details   = $_.Exception.Message
+        }
+    }
+}
+
+Write-Host "`n========== FINAL SUMMARY ==========" -ForegroundColor Green
+
+$results | Format-Table VM, Account, WasLocked, IsLocked, Result, Details -AutoSize -Wrap
+
+# Export report to the current Cloud Shell session
+$reportPath = Join-Path $HOME "azure-vm-unlock-report.csv"
+$results | Export-Csv -Path $reportPath -NoTypeInformation
+
+Write-Host "`nReport saved to: $reportPath" -ForegroundColor Green

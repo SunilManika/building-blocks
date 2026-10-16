@@ -1,0 +1,89 @@
+---
+- name: Install required packages
+  ansible.builtin.package:
+    name:
+      - unzip
+      - curl
+      - openssl
+      - jq
+    state: present
+
+- name: Create vault system group
+  ansible.builtin.group:
+    name: "{{ vault_group }}"
+    system: true
+    state: present
+
+- name: Create vault system user
+  ansible.builtin.user:
+    name: "{{ vault_user }}"
+    group: "{{ vault_group }}"
+    system: true
+    shell: /sbin/nologin
+    home: "{{ vault_data_dir }}"
+    create_home: false
+    state: present
+
+- name: Create vault directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ vault_user }}"
+    group: "{{ vault_group }}"
+    mode: "{{ item.mode }}"
+    recurse: true
+  loop:
+    - { path: "{{ vault_config_dir }}", mode: "0750" }
+    - { path: "{{ vault_data_dir }}",   mode: "0750" }
+    - { path: "{{ vault_log_dir }}",    mode: "0755" }
+    - { path: "{{ vault_tls_dir }}",    mode: "0750" }
+
+- name: Ensure vault log file exists with proper ownership
+  ansible.builtin.file:
+    path: "{{ vault_log_dir }}/vault.log"
+    state: touch
+    owner: "{{ vault_user }}"
+    group: "{{ vault_group }}"
+    mode: "0644"
+    modification_time: preserve
+    access_time: preserve
+
+- name: Check if vault binary is already installed
+  ansible.builtin.stat:
+    path: "{{ vault_install_dir }}/vault"
+  register: vault_binary
+
+- name: Download Vault zip
+  ansible.builtin.get_url:
+    url: "{{ vault_download_url }}"
+    dest: /tmp/vault.zip
+    mode: "0644"
+  when: not vault_binary.stat.exists
+
+- name: Unzip Vault binary
+  ansible.builtin.unarchive:
+    src: /tmp/vault.zip
+    dest: "{{ vault_install_dir }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when: not vault_binary.stat.exists
+
+- name: Remove vault zip
+  ansible.builtin.file:
+    path: /tmp/vault.zip
+    state: absent
+
+- name: Grant vault binary mlock capability (run without root)
+  ansible.builtin.command: setcap cap_ipc_lock=+ep {{ vault_install_dir }}/vault
+  changed_when: true
+
+- name: Verify vault binary version
+  ansible.builtin.command: "{{ vault_install_dir }}/vault version"
+  register: vault_version_output
+  changed_when: false
+
+- name: Show installed vault version
+  ansible.builtin.debug:
+    msg: "{{ vault_version_output.stdout }}"

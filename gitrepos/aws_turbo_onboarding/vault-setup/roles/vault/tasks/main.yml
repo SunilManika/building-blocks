@@ -1,0 +1,20 @@
+---
+- name: Install Vault binary
+  ansible.builtin.import_tasks: install.yml
+  tags: [vault, install]
+
+- name: Configure Vault
+  ansible.builtin.import_tasks: configure.yml
+  tags: [vault, configure]
+
+- name: Initialise and unseal Vault
+  ansible.builtin.import_tasks: init_unseal.yml
+  tags: [vault, init]
+
+- name: Configure auto-unseal on reboot
+  ansible.builtin.import_tasks: auto_unseal.yml
+  tags: [vault, auto_unseal]
+
+- name: Configure secrets engine and store credentials
+  ansible.builtin.import_tasks: secrets.yml
+  tags: [vault, secrets]

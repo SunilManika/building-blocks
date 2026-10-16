@@ -1,0 +1,75 @@
+# AWS OLA Onboarding Wizard - Windows container deployment. See DOCKER.md.
+# Requires a Windows container host. Run:  docker compose up -d --build
+name: ola-wizard
+
+services:
+  ola-wizard:
+    image: ola-wizard:${OLA_IMAGE_TAG:-latest}
+    platform: windows/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Must match (or be older than) the host OS build for process isolation; see DOCKER.md.
+        BASE_TAG: ${OLA_BASE_TAG:-ltsc2019}
+    container_name: ola-wizard
+    # process = fastest, needs host/image OS builds to match. hyperv = works across builds, needs Hyper-V.
+    isolation: ${OLA_ISOLATION:-process}
+    restart: unless-stopped
+    # Gives the wizard time to stop a running report cleanly when the container is stopped.
+    stop_grace_period: 30s
+    environment:
+      PORT: "5050"
+      # Verify Turbonomic's TLS certificate (default false: self-signed appliance certificates are accepted).
+      OLA_TURBONOMIC_VERIFY_TLS: ${OLA_TURBONOMIC_VERIFY_TLS:-false}
+      # A report run longer than this is stopped by the wizard.
+      OLA_RUN_TIMEOUT_MINUTES: ${OLA_RUN_TIMEOUT_MINUTES:-120}
+      # WinRM TrustedHosts for the Windows targets. "*" or a comma-separated list such as "10.0.*,srv01".
+      OLA_TRUSTED_HOSTS: ${OLA_TRUSTED_HOSTS:-*}
+    ports:
+      # Windows NAT does not support a host-IP prefix in port mappings; the port is always published on
+      # all host interfaces.  To limit exposure, run a local firewall rule (see DOCKER.md).
+      - "${OLA_PORT:-5050}:5050"
+    volumes:
+      # config.json holds plaintext credentials: it lives on the host, never in the image.
+      - type: bind
+        source: ./config
+        target: C:\toolkit\config
+      - type: bind
+        source: ./output
+        target: C:\toolkit\output
+      # SSH private keys for Linux targets (read-only; copied and ACL-restricted at start-up).
+      # In the wizard use the path C:\keys\<file name>.
+      - type: bind
+        source: ./keys
+        target: C:\keys-src
+        read_only: true
+    healthcheck:
+      test: ["CMD", "cmd", "/c", "curl.exe -fs -o NUL http://localhost:5050/"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    # Optional: DNS servers the container should use to resolve target VM names (defaults to the host's).
+    # dns: ["10.0.0.10"]
+    networks:
+      - ola
+
+networks:
+  ola:
+    # Default: NAT. Outbound WinRM/SSH works; targets see the container host's IP as the source.
+    driver: nat
+
+  # --- Alternative: give the container its own IP on the physical network -------------------------------------
+  # Use when firewalls on the targets only allow a specific source subnet. Replace the "ola" network above:
+  #
+  # ola:
+  #   driver: transparent        # or l2bridge
+  #   driver_opts:
+  #     com.docker.network.windowsshim.interface: "Ethernet"   # host NIC name, see Get-NetAdapter
+  #   ipam:
+  #     config:
+  #       - subnet: 10.20.30.0/24
+  #         gateway: 10.20.30.1
+  # Then add to the service:   networks: { ola: { ipv4_address: 10.20.30.50 } }
+  # With transparent/l2bridge the published "ports:" mapping does not apply: browse to the container IP instead.

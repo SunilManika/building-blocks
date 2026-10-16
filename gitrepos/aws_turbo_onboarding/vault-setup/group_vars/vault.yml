@@ -1,0 +1,100 @@
+---
+# ---------------------------------------------------------------------------
+# Vault version & install
+# ---------------------------------------------------------------------------
+vault_version: "1.17.2"
+vault_download_url: "https://releases.hashicorp.com/vault/{{ vault_version }}/vault_{{ vault_version }}_linux_amd64.zip"
+vault_install_dir: /usr/local/bin
+vault_config_dir: /etc/vault.d
+vault_data_dir: /opt/vault/data
+vault_log_dir: /var/log/vault
+vault_user: vault
+vault_group: vault
+
+# ---------------------------------------------------------------------------
+# Listener / TLS
+# ---------------------------------------------------------------------------
+vault_listen_address: "0.0.0.0:8200"
+vault_cluster_address: "0.0.0.0:8201"
+vault_tls_dir: /etc/vault.d/tls
+# Subject Alternative Names for the self-signed TLS cert (add your VM IP/hostname)
+vault_tls_cert_subject_alt_names:
+  - "IP:127.0.0.1"
+  - "IP:192.168.1.50"        # <- change to your Vault VM IP
+  - "DNS:vault.local"
+
+# ---------------------------------------------------------------------------
+# Raft Integrated Storage
+# ---------------------------------------------------------------------------
+vault_raft_node_id: "vault-node-01"
+
+# ---------------------------------------------------------------------------
+# Auto-unseal method:
+#   'file'          - store unseal keys locally (convenient, single-node)
+#   'awskms'        - AWS KMS (recommended for production)
+#   'azurekeyvault' - Azure Key Vault
+# ---------------------------------------------------------------------------
+vault_auto_unseal_type: file
+vault_unseal_keys_file: "{{ vault_config_dir }}/.unseal_keys"
+
+# AWS KMS auto-unseal (used when vault_auto_unseal_type = 'awskms')
+vault_awskms_region: "us-east-1"
+vault_awskms_key_id: "alias/vault-unseal-key"
+
+# Azure Key Vault auto-unseal (used when vault_auto_unseal_type = 'azurekeyvault')
+vault_azure_tenant_id: ""
+vault_azure_client_id: ""
+vault_azure_client_secret: ""
+vault_azure_vault_name: ""
+vault_azure_key_name: "vault-unseal"
+
+# ---------------------------------------------------------------------------
+# Vault initialisation
+# ---------------------------------------------------------------------------
+vault_init_key_shares: 5
+vault_init_key_threshold: 3
+vault_init_output_file: "{{ vault_config_dir }}/.vault_init.json"   # on Vault VM (mode 0400)
+vault_local_output_dir: "{{ playbook_dir }}/../output"              # on Ansible control node
+
+# ---------------------------------------------------------------------------
+# Secrets engine & AppRole
+# ---------------------------------------------------------------------------
+vault_kv_mount_path: secret
+vault_kv_version: 2
+vault_approle_name: turbo-toolkit
+vault_approle_token_ttl: "1h"
+vault_approle_token_max_ttl: "4h"
+vault_approle_secret_id_ttl: "0"   # 0 = never expires; set e.g. "720h" for 30 days
+
+# ---------------------------------------------------------------------------
+# Toolkit credentials to store in Vault.
+# These match config/config.json — remove plaintext passwords from config.json
+# after running the deploy playbook.
+# ---------------------------------------------------------------------------
+vault_secrets:
+  turbo/turbonomic:
+    username: "turboplanuser"
+    password: "turboplanuser"
+
+  turbo/wmi/turbo-wmi-win-d16:
+    username: "turbowmid16"
+    password: "TrbWmi#2026!X9@Q7"
+    domain: "WORKGROUP"
+
+  turbo/wmi/turbo-wmi-win-d14:
+    username: "turbowmid14"
+    password: "TrbWmi#2026!X9@Q7"
+    domain: "WORKGROUP"
+
+  turbo/wmi/turbo-wmi-win-d12:
+    username: "turbowmid12"
+    password: "TrbWmi#2026!X9@Q7"
+    domain: "WORKGROUP"
+
+  turbo/wmi/turbo-wmi-win-d10:
+    username: "turbowmid10"
+    password: "TrbWmi#2026!X9@Q7"
+    domain: "WORKGROUP"
+
+  turbo/ssh/turbo-wmi-linux-d8:
+    username: "azureuser"

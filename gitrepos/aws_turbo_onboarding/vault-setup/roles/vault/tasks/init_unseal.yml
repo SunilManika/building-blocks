@@ -1,0 +1,93 @@
+---
+- name: Check Vault initialisation status
+  ansible.builtin.uri:
+    url: "https://127.0.0.1:8200/v1/sys/init"
+    validate_certs: false
+    method: GET
+  register: vault_init_status
+
+- name: Initialise Vault (runs only on first deploy)
+  ansible.builtin.uri:
+    url: "https://127.0.0.1:8200/v1/sys/init"
+    validate_certs: false
+    method: POST
+    body_format: json
+    body:
+      secret_shares: "{{ vault_init_key_shares }}"
+      secret_threshold: "{{ vault_init_key_threshold }}"
+    status_code: 200
+  register: vault_init_result
+  when: not vault_init_status.json.initialized
+  no_log: true
+
+- name: Save init output to Vault VM (mode 0400 — root readable only)
+  ansible.builtin.copy:
+    content: "{{ vault_init_result.json | to_nice_json }}"
+    dest: "{{ vault_init_output_file }}"
+    owner: root
+    group: root
+    mode: "0400"
+  when: not vault_init_status.json.initialized
+  no_log: true
+
+- name: Ensure local output directory exists on control node
+  ansible.builtin.file:
+    path: "{{ vault_local_output_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: true
+
+- name: Copy init output to Ansible control node (output/vault-init.json)
+  ansible.builtin.copy:
+    src: "{{ vault_init_output_file }}"
+    dest: "{{ vault_local_output_dir }}/vault-init.json"
+    mode: "0600"
+    remote_src: true
+  become: true
+
+- name: Set init data fact (new initialisation)
+  ansible.builtin.set_fact:
+    vault_init_data: "{{ vault_init_result.json }}"
+  when: not vault_init_status.json.initialized
+  no_log: true
+
+- name: Load init data from file (already initialised)
+  ansible.builtin.slurp:
+    src: "{{ vault_init_output_file }}"
+  register: vault_init_file_content
+  when: vault_init_status.json.initialized
+
+- name: Parse init data from file
+  ansible.builtin.set_fact:
+    vault_init_data: "{{ vault_init_file_content.content | b64decode | from_json }}"
+  when: vault_init_status.json.initialized
+  no_log: true
+
+- name: Check Vault seal status
+  ansible.builtin.uri:
+    url: "https://127.0.0.1:8200/v1/sys/seal-status"
+    validate_certs: false
+    method: GET
+  register: vault_seal_status
+
+- name: "Unseal Vault using vault CLI"
+  ansible.builtin.command: "/usr/local/bin/vault operator unseal {{ item }}"
+  environment:
+    VAULT_ADDR: "https://127.0.0.1:8200"
+    VAULT_SKIP_VERIFY: "true"
+  loop: "{{ (vault_init_data['keys_base64'] | default(vault_init_data['keys']))[:(vault_init_key_threshold | int)] }}"
+  when: vault_seal_status.json.sealed
+  no_log: true
+
+- name: Verify Vault is unsealed
+  ansible.builtin.uri:
+    url: "https://127.0.0.1:8200/v1/sys/seal-status"
+    validate_certs: false
+    method: GET
+  register: vault_unsealed_check
+  failed_when: vault_unsealed_check.json.sealed
+
+- name: Vault status
+  ansible.builtin.debug:
+    msg: "Vault is initialised and unsealed — storage: {{ vault_unsealed_check.json.storage_type }}"

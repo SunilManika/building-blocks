@@ -1,0 +1,63 @@
+---
+# ---------------------------------------------------------------------------
+# Auto-unseal on reboot — file-based method
+#
+# Stores the minimum required unseal keys in a protected file and runs a
+# lightweight systemd one-shot service after vault.service starts.
+#
+# For production: switch vault_auto_unseal_type to 'awskms' or 'azurekeyvault'
+# in group_vars/vault.yml and remove this file-based setup entirely.
+# Vault will then unseal itself via the cloud KMS on every restart.
+# ---------------------------------------------------------------------------
+
+- name: Write unseal keys to protected file (file-based only)
+  ansible.builtin.copy:
+    content: "{{ (vault_init_data['keys_base64'] | default(vault_init_data['keys'])) | to_json }}"
+    dest: "{{ vault_unseal_keys_file }}"
+    owner: "{{ vault_user }}"
+    group: "{{ vault_group }}"
+    mode: "0400"
+  no_log: true
+  when: vault_auto_unseal_type == 'file'
+
+- name: Deploy vault-unseal script
+  ansible.builtin.template:
+    src: vault-unseal.sh.j2
+    dest: /usr/local/bin/vault-unseal.sh
+    owner: root
+    group: root
+    mode: "0750"
+  when: vault_auto_unseal_type == 'file'
+
+- name: Deploy vault-unseal systemd unit
+  ansible.builtin.template:
+    src: vault-unseal.service.j2
+    dest: /etc/systemd/system/vault-unseal.service
+    owner: root
+    group: root
+    mode: "0644"
+  when: vault_auto_unseal_type == 'file'
+  notify: Reload systemd
+
+- name: Enable vault-unseal service
+  ansible.builtin.systemd:
+    name: vault-unseal
+    enabled: true
+    daemon_reload: true
+  when: vault_auto_unseal_type == 'file'
+
+- name: Test execute vault-unseal script directly
+  ansible.builtin.command: /usr/local/bin/vault-unseal.sh
+  register: unseal_script_run
+  changed_when: "'auto-unsealed successfully' in unseal_script_run.stdout"
+  until: unseal_script_run.rc == 0
+  retries: 5
+  delay: 2
+  when: vault_auto_unseal_type == 'file'
+
+- name: Note — KMS-based auto-unseal configured in vault.hcl (no local key file)
+  ansible.builtin.debug:
+    msg: >
+      Auto-unseal type is '{{ vault_auto_unseal_type }}'.
+      Vault will unseal automatically via the configured KMS — no local key file needed.
+  when: vault_auto_unseal_type != 'file'
